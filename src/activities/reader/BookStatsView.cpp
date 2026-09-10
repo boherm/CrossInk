@@ -20,6 +20,22 @@
 
 namespace {
 constexpr int kStatsButtonHintTopGap = 10;
+constexpr int kHeatmapTargetWeeks = 18;
+constexpr int kHeatmapMaxWeeks = (READING_HISTORY_DAYS + 6) / 7;
+constexpr int kHeatmapMinCellStride = 8;
+constexpr int kHeatmapMaxCellStride = 26;
+constexpr int kHeatmapSidePadding = 12;
+constexpr int kHeatmapDayLabelGap = 8;
+constexpr int kHeatmapLegendCell = 12;
+constexpr int kHeatmapLegendTopGap = 8;
+constexpr int kHeatmapLegendLabelGap = 6;
+constexpr int kHeatmapLegendItemGap = 18;
+constexpr int kMonthSidePadding = 12;
+constexpr int kMonthHeaderGap = 8;
+constexpr int kMonthCellGap = 5;
+constexpr int kMonthMinCellStride = 18;
+constexpr int kMonthMaxRowStride = 60;
+constexpr int kStreakSummaryCardPadding = 28;
 constexpr int kStandaloneNoRtcMaxTopCardHeightDivisor = 2;
 constexpr int kStandaloneNoRtcMaxVerticalOffset = 32;
 constexpr int kPerBookRtcTopCardMaxExtra = 84;
@@ -85,6 +101,14 @@ constexpr std::array<StrId, READING_DAY_OF_WEEK_COUNT> DAY_LABELS = {
     StrId::STR_STATS_FRI, StrId::STR_STATS_SAT, StrId::STR_STATS_SUN};
 
 const char* dayCountText(const uint16_t days) { return days == 1 ? tr(STR_STATS_DAY) : tr(STR_STATS_DAYS); }
+
+void formatStreakDayCount(const uint16_t days, char* buf, const size_t len) {
+  if (days > 0) {
+    snprintf(buf, len, "%u", static_cast<unsigned>(days));
+  } else {
+    snprintf(buf, len, "-");
+  }
+}
 
 int sectionCardHeight(const StatsLayout& layout, const int rowCount) {
   if (rowCount <= 0) {
@@ -461,6 +485,304 @@ void drawDateAdjustButton(const GfxRenderer& renderer, const int x, const int y,
       bitmap, freeink::ui::BitmapMode::Center,
       [&renderer](const int16_t px, const int16_t py) { renderer.drawPixel(px, py, true); });
 }
+
+// Rolling day-history heatmap: one column per week, one row per weekday, most
+// recent week last. The stored history is one bit per day, so a cell is either
+// "read" (solid) or "not read" (light gray).
+struct HeatmapGeometry {
+  int weeks = 0;
+  int cellStride = 0;
+  int cellSize = 0;
+  int gridX = 0;
+  int gridTop = 0;  // Top of the weekday rows, below the month labels.
+  int dayLabelX = 0;
+  int monthLabelH = 0;
+  int legendY = 0;
+  bool valid = false;
+};
+
+// Current-month calendar: seven weekday columns, one row per calendar week.
+struct MonthGridGeometry {
+  int columnStride = 0;
+  int rowStride = 0;
+  int cellSize = 0;
+  int rows = 0;
+  int firstDayColumn = 0;  // Weekday column (Monday = 0) holding day 1.
+  int daysInCurrentMonth = 0;
+  int gridX = 0;
+  int gridTop = 0;
+  int headerY = 0;
+  bool valid = false;
+};
+
+int heatmapDayLabelColumnWidth(const GfxRenderer& renderer, const StatsLayout& layout) {
+  int maxLabelW = 0;
+  for (const StrId label : DAY_LABELS) {
+    maxLabelW = std::max(maxLabelW, renderer.getTextWidth(layout.chartLabelFontId, I18N.get(label)));
+  }
+  return maxLabelW + kHeatmapDayLabelGap;
+}
+
+// Derived from the card width alone so the card height can be budgeted before
+// the grid is laid out. Every weekday keeps its own label, so a row can never
+// be shorter than one line of the label font.
+int heatmapCellStrideForWidth(const GfxRenderer& renderer, const int w, const StatsLayout& layout) {
+  const int gridAvailW = w - kHeatmapSidePadding * 2 - heatmapDayLabelColumnWidth(renderer, layout);
+  const int minStride = std::max(kHeatmapMinCellStride, renderer.getLineHeight(layout.chartLabelFontId) + 1);
+  if (gridAvailW < minStride) {
+    return 0;
+  }
+  return std::clamp(gridAvailW / kHeatmapTargetWeeks, minStride, kHeatmapMaxCellStride);
+}
+
+int heatmapNaturalCardHeight(const GfxRenderer& renderer, const int w, const StatsLayout& layout) {
+  const int cellStride = heatmapCellStrideForWidth(renderer, w, layout);
+  if (cellStride == 0) {
+    return sectionCardHeight(layout, 0);
+  }
+  const int monthLabelH = renderer.getLineHeight(layout.chartLabelFontId) + 4;
+  const int legendH = renderer.getLineHeight(SMALL_FONT_ID) + kHeatmapLegendTopGap;
+  return layout.sectionTitleH + layout.chartTopPadding + monthLabelH +
+         static_cast<int>(READING_DAY_OF_WEEK_COUNT) * cellStride + legendH + layout.chartBottomPadding;
+}
+
+HeatmapGeometry computeHeatmapGeometry(const GfxRenderer& renderer, const int x, const int y, const int w, const int h,
+                                       const StatsLayout& layout) {
+  constexpr int dayRows = static_cast<int>(READING_DAY_OF_WEEK_COUNT);
+  HeatmapGeometry geometry;
+  const int cellStride = heatmapCellStrideForWidth(renderer, w, layout);
+  if (cellStride == 0) {
+    return geometry;
+  }
+
+  const int labelLineH = renderer.getLineHeight(layout.chartLabelFontId);
+  const int dayLabelColumnW = heatmapDayLabelColumnWidth(renderer, layout);
+  const int legendH = renderer.getLineHeight(SMALL_FONT_ID) + kHeatmapLegendTopGap;
+  geometry.monthLabelH = labelLineH + 4;
+
+  const int contentTop = y + layout.sectionTitleH + layout.chartTopPadding;
+  const int contentBottom = y + h - layout.chartBottomPadding - legendH;
+  const int gridAvailW = w - kHeatmapSidePadding * 2 - dayLabelColumnW;
+  const int gridAvailH = contentBottom - contentTop - geometry.monthLabelH;
+  if (gridAvailH < dayRows * kHeatmapMinCellStride) {
+    return geometry;
+  }
+
+  geometry.cellStride = std::min(cellStride, gridAvailH / dayRows);
+  geometry.weeks = std::clamp(gridAvailW / geometry.cellStride, 1, kHeatmapMaxWeeks);
+  const int cellGap = std::max(1, geometry.cellStride / 7);
+  geometry.cellSize = geometry.cellStride - cellGap;
+
+  const int gridW = geometry.weeks * geometry.cellStride - cellGap;
+  const int gridH = dayRows * geometry.cellStride - cellGap;
+  const int blockX = x + (w - dayLabelColumnW - gridW) / 2;
+  geometry.dayLabelX = blockX;
+  geometry.gridX = blockX + dayLabelColumnW;
+  geometry.gridTop = contentTop + geometry.monthLabelH + std::max(0, (gridAvailH - gridH) / 2);
+  geometry.legendY = contentBottom + (legendH - renderer.getLineHeight(SMALL_FONT_ID)) / 2;
+  geometry.valid = true;
+  return geometry;
+}
+
+void drawHeatmapMonthLabels(const GfxRenderer& renderer, const HeatmapGeometry& geometry,
+                            const uint32_t firstMondayDay, const StatsLayout& layout) {
+  const int labelY = geometry.gridTop - geometry.monthLabelH;
+  int lastLabelRight = 0;
+  uint8_t previousMonth = 0;
+  char monthBuf[8];
+  for (int week = 0; week < geometry.weeks; ++week) {
+    ReadingStatsDate weekStart;
+    if (!readingStatsDateFromDayIndex(firstMondayDay + static_cast<uint32_t>(week) * 7u, weekStart)) {
+      continue;
+    }
+    if (weekStart.month == previousMonth) {
+      continue;
+    }
+    previousMonth = weekStart.month;
+
+    const int labelX = geometry.gridX + week * geometry.cellStride;
+    if (lastLabelRight > 0 && labelX < lastLabelRight) {
+      continue;
+    }
+    formatReadingStatsMonthToken(weekStart, monthBuf, sizeof(monthBuf));
+    renderer.drawText(layout.chartLabelFontId, labelX, labelY, monthBuf);
+    lastLabelRight = labelX + renderer.getTextWidth(layout.chartLabelFontId, monthBuf) + kHeatmapDayLabelGap;
+  }
+}
+
+void drawHeatmapCell(const GfxRenderer& renderer, const int x, const int y, const int size, const bool wasRead,
+                     const bool isToday) {
+  if (wasRead) {
+    renderer.fillRect(x, y, size, size, true);
+  } else {
+    renderer.fillRectDither(x, y, size, size, Color::LightGray);
+  }
+  if (!isToday) {
+    return;
+  }
+  // Today keeps a ring in the opposite shade so it stays visible either way.
+  if (wasRead) {
+    renderer.drawRect(x + 1, y + 1, size - 2, size - 2, false);
+  } else {
+    renderer.fillRect(x, y, size, size, false);
+    renderer.drawRect(x, y, size, size, true);
+  }
+}
+
+void drawHeatmapLegend(const GfxRenderer& renderer, const int x, const int w, const HeatmapGeometry& geometry) {
+  const int legendLineH = renderer.getLineHeight(SMALL_FONT_ID);
+  const int cellY = geometry.legendY + (legendLineH - kHeatmapLegendCell) / 2;
+  const char* readLabel = tr(STR_STATS_READ_DAY);
+  const char* todayLabel = tr(STR_STATS_TODAY);
+  const int readLabelW = renderer.getTextWidth(SMALL_FONT_ID, readLabel);
+  const int todayLabelW = renderer.getTextWidth(SMALL_FONT_ID, todayLabel);
+  const int totalW =
+      (kHeatmapLegendCell + kHeatmapLegendLabelGap) * 2 + readLabelW + todayLabelW + kHeatmapLegendItemGap;
+  int legendX = x + (w - totalW) / 2;
+
+  drawHeatmapCell(renderer, legendX, cellY, kHeatmapLegendCell, true, false);
+  legendX += kHeatmapLegendCell + kHeatmapLegendLabelGap;
+  renderer.drawText(SMALL_FONT_ID, legendX, geometry.legendY, readLabel);
+  legendX += readLabelW + kHeatmapLegendItemGap;
+  drawHeatmapCell(renderer, legendX, cellY, kHeatmapLegendCell, false, true);
+  legendX += kHeatmapLegendCell + kHeatmapLegendLabelGap;
+  renderer.drawText(SMALL_FONT_ID, legendX, geometry.legendY, todayLabel);
+}
+
+void drawReadingHeatmap(const GfxRenderer& renderer, const int x, const int w, const GlobalReadingStats& stats,
+                        const ReadingStatsDate& today, const HeatmapGeometry& geometry, const StatsLayout& layout) {
+  const uint32_t todayDay = readingStatsDayIndex(today);
+  const uint32_t currentWeekMondayDay = todayDay - readingStatsDayOfWeekIndex(today);
+  const uint32_t weeksBack = static_cast<uint32_t>(geometry.weeks - 1) * 7u;
+  const uint32_t firstMondayDay = currentWeekMondayDay > weeksBack ? currentWeekMondayDay - weeksBack : 0u;
+  const int labelLineH = renderer.getLineHeight(layout.chartLabelFontId);
+
+  drawHeatmapMonthLabels(renderer, geometry, firstMondayDay, layout);
+
+  for (size_t row = 0; row < READING_DAY_OF_WEEK_COUNT; ++row) {
+    const int rowY = geometry.gridTop + static_cast<int>(row) * geometry.cellStride;
+    renderer.drawText(layout.chartLabelFontId, geometry.dayLabelX, rowY + (geometry.cellSize - labelLineH) / 2,
+                      I18N.get(DAY_LABELS[row]));
+    for (int week = 0; week < geometry.weeks; ++week) {
+      const uint32_t dayIndex = firstMondayDay + static_cast<uint32_t>(week) * 7u + static_cast<uint32_t>(row);
+      if (dayIndex > todayDay) {
+        continue;
+      }
+      drawHeatmapCell(renderer, geometry.gridX + week * geometry.cellStride, rowY, geometry.cellSize,
+                      stats.didReadOnDay(dayIndex), dayIndex == todayDay);
+    }
+  }
+
+  drawHeatmapLegend(renderer, x, w, geometry);
+}
+
+int monthGridRowCount(const ReadingStatsDate& today) {
+  const ReadingStatsDate firstOfMonth{today.year, today.month, 1};
+  const int leadingDays = readingStatsDayOfWeekIndex(firstOfMonth);
+  const int totalCells = leadingDays + daysInMonth(today.year, today.month);
+  return (totalCells + 6) / 7;
+}
+
+int monthGridCardHeight(const GfxRenderer& renderer, const StatsLayout& layout, const ReadingStatsDate& today,
+                        const int rowStride) {
+  const int headerH = renderer.getLineHeight(layout.chartLabelFontId) + kMonthHeaderGap;
+  return layout.sectionTitleH + layout.chartTopPadding + headerH + monthGridRowCount(today) * rowStride +
+         layout.chartBottomPadding;
+}
+
+MonthGridGeometry computeMonthGridGeometry(const GfxRenderer& renderer, const int x, const int y, const int w,
+                                           const int h, const StatsLayout& layout, const ReadingStatsDate& today) {
+  MonthGridGeometry geometry;
+  const int headerH = renderer.getLineHeight(layout.chartLabelFontId) + kMonthHeaderGap;
+  const int contentTop = y + layout.sectionTitleH + layout.chartTopPadding;
+  const int contentBottom = y + h - layout.chartBottomPadding;
+  const int gridAvailW = w - kMonthSidePadding * 2;
+  const int gridAvailH = contentBottom - contentTop - headerH;
+  geometry.rows = monthGridRowCount(today);
+  if (gridAvailW < kMonthMinCellStride * 7 || gridAvailH < kMonthMinCellStride * geometry.rows) {
+    return geometry;
+  }
+
+  geometry.columnStride = gridAvailW / 7;
+  geometry.rowStride = std::clamp(gridAvailH / geometry.rows, kMonthMinCellStride, kMonthMaxRowStride);
+  geometry.cellSize = std::min(geometry.columnStride, geometry.rowStride) - kMonthCellGap;
+  geometry.firstDayColumn = readingStatsDayOfWeekIndex(ReadingStatsDate{today.year, today.month, 1});
+  geometry.daysInCurrentMonth = daysInMonth(today.year, today.month);
+  geometry.gridX = x + (w - geometry.columnStride * 7) / 2;
+  geometry.gridTop = contentTop + headerH + std::max(0, (gridAvailH - geometry.rows * geometry.rowStride) / 2);
+  geometry.headerY = geometry.gridTop - headerH + (kMonthHeaderGap / 2);
+  geometry.valid = true;
+  return geometry;
+}
+
+void drawMonthDayCell(const GfxRenderer& renderer, const int x, const int y, const int size, const int day,
+                      const bool wasRead, const bool isToday) {
+  if (wasRead) {
+    renderer.fillRect(x, y, size, size, true);
+  } else {
+    renderer.drawRect(x, y, size, size, true);
+  }
+  if (isToday) {
+    renderer.drawRect(x + 2, y + 2, size - 4, size - 4, !wasRead);
+  }
+
+  char dayBuf[4];
+  snprintf(dayBuf, sizeof(dayBuf), "%d", day);
+  const int textW = renderer.getTextWidth(SMALL_FONT_ID, dayBuf);
+  const int textH = renderer.getLineHeight(SMALL_FONT_ID);
+  renderer.drawText(SMALL_FONT_ID, x + (size - textW) / 2, y + (size - textH) / 2, dayBuf, !wasRead);
+}
+
+void drawMonthGrid(const GfxRenderer& renderer, const GlobalReadingStats& stats, const ReadingStatsDate& today,
+                   const MonthGridGeometry& geometry, const StatsLayout& layout) {
+  const uint32_t todayDay = readingStatsDayIndex(today);
+  const uint32_t firstDayIndex = readingStatsDayIndex(ReadingStatsDate{today.year, today.month, 1});
+  const int cellOffset = (geometry.columnStride - geometry.cellSize) / 2;
+
+  for (size_t column = 0; column < READING_DAY_OF_WEEK_COUNT; ++column) {
+    const int columnX = geometry.gridX + static_cast<int>(column) * geometry.columnStride;
+    drawCenteredLabel(renderer, layout.chartLabelFontId, columnX, geometry.columnStride, geometry.headerY,
+                      I18N.get(DAY_LABELS[column]));
+  }
+
+  for (int day = 1; day <= geometry.daysInCurrentMonth; ++day) {
+    const int cellIndex = geometry.firstDayColumn + day - 1;
+    const int column = cellIndex % 7;
+    const int row = cellIndex / 7;
+    const uint32_t dayIndex = firstDayIndex + static_cast<uint32_t>(day - 1);
+    drawMonthDayCell(renderer, geometry.gridX + column * geometry.columnStride + cellOffset,
+                     geometry.gridTop + row * geometry.rowStride + (geometry.rowStride - geometry.cellSize) / 2,
+                     geometry.cellSize, day, stats.didReadOnDay(dayIndex), dayIndex == todayDay);
+  }
+}
+
+int streakSummaryCardHeight(const GfxRenderer& renderer, const StatsLayout& layout) {
+  return layout.topCardTitleH + renderer.getLineHeight(UI_12_FONT_ID) + 4 + renderer.getLineHeight(SMALL_FONT_ID) +
+         kStreakSummaryCardPadding;
+}
+
+void drawStreakSummaryCard(const GfxRenderer& renderer, const int x, const int y, const int w, const int h,
+                           const char* title, const GlobalReadingStats& stats, const ReadingStatsDate* today,
+                           const StatsLayout& layout) {
+  renderer.drawRect(x, y, w, h);
+  renderer.drawLine(x, y + layout.topCardTitleH, x + w, y + layout.topCardTitleH);
+  drawCenteredLabel(renderer, UI_10_FONT_ID, x, w,
+                    y + (layout.topCardTitleH - renderer.getLineHeight(UI_10_FONT_ID)) / 2, title, true);
+
+  const int thirdW = w / 3;
+  const int rowY = y + layout.topCardTitleH;
+  const int rowH = h - layout.topCardTitleH;
+  char buf[16];
+
+  formatStreakDayCount(stats.currentReadingStreak(today), buf, sizeof(buf));
+  drawStatCell(renderer, x, thirdW, rowY, rowH, buf, tr(STR_STATS_READING_STREAK_LBL));
+
+  formatStreakDayCount(stats.displayLongestReadingStreak(), buf, sizeof(buf));
+  drawStatCell(renderer, x + thirdW, thirdW, rowY, rowH, buf, tr(STR_STATS_LONGEST_STREAK_LBL));
+
+  formatStreakDayCount(stats.totalReadingDays(), buf, sizeof(buf));
+  drawStatCell(renderer, x + thirdW * 2, thirdW, rowY, rowH, buf, tr(STR_STATS_DAYS_READ_LBL));
+}
 }  // namespace
 
 void renderPerBookStatsPage(GfxRenderer& renderer, const MappedInputManager* mappedInput, const std::string& bookTitle,
@@ -593,6 +915,89 @@ void renderGlobalStatsPage(GfxRenderer& renderer, const MappedInputManager* mapp
     const auto labels =
         mappedInput->mapLabels(mappedInput->withBackArrow(tr(STR_EXIT)), "", mappedInput->withBackArrow(tr(STR_BACK)),
                                showMoreButton ? tr(STR_MORE) : "");
+    GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4, true);
+  }
+}
+
+void renderReadingHistoryPage(GfxRenderer& renderer, const MappedInputManager* mappedInput, const char* screenTitle,
+                              const GlobalReadingStats& stats, const bool showButtonHints) {
+  renderer.clearScreen();
+  const auto& metrics = UITheme::getInstance().getMetrics();
+  const auto& layout = getStatsLayout(renderer, mappedInput, true, showButtonHints, true);
+  if (mappedInput && mappedInput->hasTouchHardware()) {
+    TouchHeaderBackButton::drawCompact(renderer, tr(STR_STATS_READING_HISTORY), false);
+  } else {
+    CompactHeader::drawTitle(renderer, tr(STR_STATS_READING_HISTORY));
+  }
+
+  const int cardX = metrics.contentSidePadding;
+  const int cardW = renderer.getScreenWidth() - metrics.contentSidePadding * 2;
+  const int availableHeight =
+      renderer.getScreenHeight() - metrics.topPadding - statsBottomInset(metrics, showButtonHints);
+  const int headerHeight = statsHeaderHeight(metrics, layout, mappedInput);
+
+  ReadingStatsDateTime now;
+  ReadingStatsDate today;
+  if (getCurrentLocalReadingStatsDateTime(now)) {
+    today = now.date;
+  } else if (!readingStatsDateFromDayIndex(stats.readingHistoryAnchorDay, today)) {
+    today.clear();
+  }
+
+  const int summaryCardH = streakSummaryCardHeight(renderer, layout);
+  int y = metrics.topPadding + headerHeight + layout.topGap;
+  drawStreakSummaryCard(renderer, cardX, y, cardW, summaryCardH, screenTitle, stats, today.isValid() ? &today : nullptr,
+                        layout);
+  y += summaryCardH + layout.cardGap;
+
+  // The heatmap keeps its natural height and the current-month calendar takes
+  // whatever is left, so both stay readable instead of one card ballooning.
+  const int remainingHeight = std::max(sectionCardHeight(layout, 0), availableHeight - (y - metrics.topPadding));
+  const int heatmapNaturalH = heatmapNaturalCardHeight(renderer, cardW, layout);
+  const int monthMinCardH = today.isValid() ? monthGridCardHeight(renderer, layout, today, kMonthMinCellStride) : 0;
+  const bool hasMonthCard =
+      today.isValid() && remainingHeight >= heatmapNaturalH + layout.cardGap + monthMinCardH;
+  const int heatmapCardH = hasMonthCard ? heatmapNaturalH : remainingHeight;
+
+  const HeatmapGeometry heatmapGeometry = computeHeatmapGeometry(renderer, cardX, y, cardW, heatmapCardH, layout);
+  const bool canDrawHeatmap = heatmapGeometry.valid && today.isValid();
+
+  char cardTitle[40];
+  if (canDrawHeatmap) {
+    snprintf(cardTitle, sizeof(cardTitle), tr(STR_STATS_LAST_WEEKS_FORMAT),
+             static_cast<unsigned>(heatmapGeometry.weeks));
+  } else {
+    snprintf(cardTitle, sizeof(cardTitle), "%s", tr(STR_STATS_READING_HISTORY));
+  }
+  drawSectionCard(renderer, cardX, y, cardW, heatmapCardH, cardTitle, layout);
+
+  if (canDrawHeatmap) {
+    drawReadingHeatmap(renderer, cardX, cardW, stats, today, heatmapGeometry, layout);
+  } else {
+    const int messageY = y + layout.sectionTitleH + (heatmapCardH - layout.sectionTitleH) / 2 -
+                         renderer.getLineHeight(UI_10_FONT_ID) / 2;
+    drawCenteredLabel(renderer, UI_10_FONT_ID, cardX, cardW, messageY, tr(STR_STATS_NO_HISTORY));
+  }
+
+  if (hasMonthCard) {
+    y += heatmapCardH + layout.cardGap;
+    const int monthCardH = remainingHeight - heatmapCardH - layout.cardGap;
+    char monthTitle[24];
+    char monthToken[8];
+    formatReadingStatsMonthToken(today, monthToken, sizeof(monthToken));
+    snprintf(monthTitle, sizeof(monthTitle), "%s %u", monthToken, static_cast<unsigned>(today.year));
+    drawSectionCard(renderer, cardX, y, cardW, monthCardH, monthTitle, layout);
+
+    const MonthGridGeometry monthGeometry =
+        computeMonthGridGeometry(renderer, cardX, y, cardW, monthCardH, layout, today);
+    if (monthGeometry.valid) {
+      drawMonthGrid(renderer, stats, today, monthGeometry, layout);
+    }
+  }
+
+  if (showButtonHints && mappedInput) {
+    const auto labels = mappedInput->mapLabels(mappedInput->withBackArrow(tr(STR_EXIT)), "",
+                                               mappedInput->withBackArrow(tr(STR_BACK)), "");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4, true);
   }
 }
