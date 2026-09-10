@@ -765,7 +765,7 @@ bool MappedInputManager::wasPressed(const Button button) const {
     if (powerAsConfirmInReaderMode && gpio.wasPressed(HalGPIO::BTN_POWER)) {
       // The active reader popup owns this Power press. Keep its configured
       // short/long action from firing after the popup confirms on press.
-      suppressPowerRelease = true;
+      releaseSuppression.suppressPower();
       return true;
     }
 
