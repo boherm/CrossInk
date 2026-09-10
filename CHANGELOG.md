@@ -9,6 +9,7 @@
 - Configurable touch page-turn gestures, pinch-to-resize text, two-finger rotation and swipe actions, and a tap-to-hide reader status bar.
 - Selectable keyboard layouts, switchable from the keyboard's language key.
 - Clippings from dictionary lookups on touch devices, plus selection of text inside EPUB tables.
+- A Reading History page in Reading Stats, with a day-by-day heatmap of the recent weeks, a full calendar of the current month, and current/longest streak and total days-read counters.
 
 ### Changed
 
