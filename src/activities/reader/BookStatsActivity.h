@@ -9,7 +9,7 @@
 #include "GlobalReadingStats.h"
 
 class BookStatsActivity final : public Activity {
-  enum class Page : uint8_t { PerBook, ThisDevice, AllDevices, EditDates };
+  enum class Page : uint8_t { PerBook, ThisDevice, AllDevices, History, EditDates };
 
   std::string bookTitle;
   std::string bookCachePath;
@@ -49,6 +49,8 @@ class BookStatsActivity final : public Activity {
   void exitStatsActivity();
   bool showPreviousStatsPage();
   bool showNextStatsPage();
+  int statsPageCount() const { return showAllDevicesStats ? 4 : 3; }
+  int statsPageIndex() const;
   bool selectEditFieldFromTouchTarget(int touchTarget);
 
  public:
