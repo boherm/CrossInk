@@ -389,3 +389,15 @@ uint16_t GlobalReadingStats::displayLongestReadingStreak() const {
   return std::max(longestReadingStreak,
                   computeReadingHistoryLongestStreak(readingHistoryAnchorDay, readingHistoryBits));
 }
+
+bool GlobalReadingStats::hasReadingHistory() const {
+  return hasAnyReadingHistory(readingHistoryAnchorDay, readingHistoryBits);
+}
+
+bool GlobalReadingStats::didReadOnDay(const uint32_t dayIndex) const {
+  return readingHistoryHasDay(readingHistoryAnchorDay, readingHistoryBits, dayIndex);
+}
+
+uint16_t GlobalReadingStats::totalReadingDays() const {
+  return countReadingHistoryDays(readingHistoryAnchorDay, readingHistoryBits);
+}
