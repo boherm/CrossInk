@@ -293,6 +293,22 @@ void BookStatsActivity::exitStatsActivity() {
   finish();
 }
 
+int BookStatsActivity::statsPageIndex() const {
+  switch (page) {
+    case Page::PerBook:
+      return 0;
+    case Page::ThisDevice:
+      return 1;
+    case Page::AllDevices:
+      return 2;
+    case Page::History:
+      return showAllDevicesStats ? 3 : 2;
+    case Page::EditDates:
+      break;
+  }
+  return 0;
+}
+
 bool BookStatsActivity::showNextStatsPage() {
   if (page == Page::PerBook) {
     page = Page::ThisDevice;
@@ -300,8 +316,14 @@ bool BookStatsActivity::showNextStatsPage() {
     return true;
   }
 
-  if (page == Page::ThisDevice && showAllDevicesStats) {
-    page = Page::AllDevices;
+  if (page == Page::ThisDevice) {
+    page = showAllDevicesStats ? Page::AllDevices : Page::History;
+    requestUpdate();
+    return true;
+  }
+
+  if (page == Page::AllDevices) {
+    page = Page::History;
     requestUpdate();
     return true;
   }
@@ -310,6 +332,12 @@ bool BookStatsActivity::showNextStatsPage() {
 }
 
 bool BookStatsActivity::showPreviousStatsPage() {
+  if (page == Page::History) {
+    page = showAllDevicesStats ? Page::AllDevices : Page::ThisDevice;
+    requestUpdate();
+    return true;
+  }
+
   if (page == Page::AllDevices) {
     page = Page::ThisDevice;
     requestUpdate();
@@ -475,7 +503,7 @@ void BookStatsActivity::loop() {
     return;
   }
 
-  if (page == Page::ThisDevice && showAllDevicesStats && downOrRightPressed) {
+  if (downOrRightPressed) {
     showNextStatsPage();
   }
 }
@@ -495,18 +523,23 @@ void BookStatsActivity::render(RenderLock&&) {
                              estimatedTimeLeftSeconds, true, hasEditableBook(), true);
       break;
     case Page::ThisDevice:
-      renderGlobalStatsPage(renderer, &mappedInput, tr(STR_STATS_THIS_DEVICE_SCREEN), globalStats, true,
-                            showAllDevicesStats);
+      renderGlobalStatsPage(renderer, &mappedInput, tr(STR_STATS_THIS_DEVICE_SCREEN), globalStats, true, true);
       break;
     case Page::AllDevices:
-      renderGlobalStatsPage(renderer, &mappedInput, tr(STR_STATS_ALL_DEVICES_SCREEN), allDevicesStats, true, false);
+      renderGlobalStatsPage(renderer, &mappedInput, tr(STR_STATS_ALL_DEVICES_SCREEN), allDevicesStats, true, true);
+      break;
+    case Page::History:
+      renderReadingHistoryPage(
+          renderer, &mappedInput,
+          showAllDevicesStats ? tr(STR_STATS_ALL_DEVICES_SCREEN) : tr(STR_STATS_THIS_DEVICE_SCREEN),
+          showAllDevicesStats ? allDevicesStats : globalStats, true);
       break;
     case Page::EditDates:
       renderEditBookDatesPage(renderer, &mappedInput, bookTitle, stats, selectedEditField, true);
       break;
   }
   if (page != Page::EditDates) {
-    drawPageIndicators(renderer, static_cast<int>(page), showAllDevicesStats ? 3 : 2);
+    drawPageIndicators(renderer, statsPageIndex(), statsPageCount());
   }
   renderer.displayBuffer();
 }
