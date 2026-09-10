@@ -469,3 +469,29 @@ uint16_t computeReadingHistoryCurrentStreak(uint32_t anchorDay, const std::array
   }
   return streak;
 }
+
+bool hasAnyReadingHistory(const uint32_t anchorDay, const std::array<uint8_t, READING_HISTORY_BYTES>& bits) {
+  return anchorDay != 0 || isBitSet(bits, 0);
+}
+
+bool readingHistoryHasDay(const uint32_t anchorDay, const std::array<uint8_t, READING_HISTORY_BYTES>& bits,
+                          const uint32_t dayIndex) {
+  if (!hasAnyReadingHistory(anchorDay, bits) || dayIndex > anchorDay) {
+    return false;
+  }
+  return isBitSet(bits, static_cast<size_t>(anchorDay - dayIndex));
+}
+
+uint16_t countReadingHistoryDays(const uint32_t anchorDay, const std::array<uint8_t, READING_HISTORY_BYTES>& bits) {
+  if (!hasAnyReadingHistory(anchorDay, bits)) {
+    return 0;
+  }
+
+  uint16_t total = 0;
+  for (size_t bitIndex = 0; bitIndex < READING_HISTORY_DAYS; ++bitIndex) {
+    if (isBitSet(bits, bitIndex)) {
+      total++;
+    }
+  }
+  return total;
+}

@@ -47,4 +47,13 @@ struct GlobalReadingStats {
   void recordReadingSpan(const ReadingStatsDateTime& localStart, uint32_t seconds);
   uint16_t currentReadingStreak(const ReadingStatsDate* today) const;
   uint16_t displayLongestReadingStreak() const;
+
+  // True when at least one day has been recorded in the rolling day history.
+  bool hasReadingHistory() const;
+
+  // True when the day identified by readingStatsDayIndex() was a reading day.
+  bool didReadOnDay(uint32_t dayIndex) const;
+
+  // Number of distinct reading days still inside the rolling history window.
+  uint16_t totalReadingDays() const;
 };
