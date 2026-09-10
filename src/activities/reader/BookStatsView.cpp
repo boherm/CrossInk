@@ -925,9 +925,9 @@ void renderReadingHistoryPage(GfxRenderer& renderer, const MappedInputManager* m
   const auto& metrics = UITheme::getInstance().getMetrics();
   const auto& layout = getStatsLayout(renderer, mappedInput, true, showButtonHints, true);
   if (mappedInput && mappedInput->hasTouchHardware()) {
-    TouchHeaderBackButton::drawCompact(renderer, tr(STR_STATS_READING_HISTORY), false);
+    TouchHeaderBackButton::drawCompact(renderer, tr(STR_STATS_READING_HISTORY), false, true);
   } else {
-    CompactHeader::drawTitle(renderer, tr(STR_STATS_READING_HISTORY));
+    CompactHeader::drawTitle(renderer, tr(STR_STATS_READING_HISTORY), true);
   }
 
   const int cardX = metrics.contentSidePadding;
