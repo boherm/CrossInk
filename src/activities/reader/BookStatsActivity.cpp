@@ -295,14 +295,14 @@ void BookStatsActivity::exitStatsActivity() {
 
 int BookStatsActivity::statsPageIndex() const {
   switch (page) {
-    case Page::PerBook:
-      return 0;
-    case Page::ThisDevice:
-      return 1;
-    case Page::AllDevices:
-      return 2;
     case Page::History:
-      return showAllDevicesStats ? 3 : 2;
+      return 0;
+    case Page::PerBook:
+      return 1;
+    case Page::ThisDevice:
+      return 2;
+    case Page::AllDevices:
+      return 3;
     case Page::EditDates:
       break;
   }
@@ -310,6 +310,12 @@ int BookStatsActivity::statsPageIndex() const {
 }
 
 bool BookStatsActivity::showNextStatsPage() {
+  if (page == Page::History) {
+    page = Page::PerBook;
+    requestUpdate();
+    return true;
+  }
+
   if (page == Page::PerBook) {
     page = Page::ThisDevice;
     requestUpdate();
@@ -332,6 +338,12 @@ bool BookStatsActivity::showNextStatsPage() {
 }
 
 bool BookStatsActivity::showPreviousStatsPage() {
+  if (page == Page::PerBook) {
+    page = Page::History;
+    requestUpdate();
+    return true;
+  }
+
   if (page == Page::History) {
     page = showAllDevicesStats ? Page::AllDevices : Page::ThisDevice;
     requestUpdate();
@@ -488,7 +500,8 @@ void BookStatsActivity::loop() {
       return;
     }
     if (hasEditableBook() && upOrLeftPressed) {
-      beginDateEditing();
+      // beginDateEditing();
+      showPreviousStatsPage();
       return;
     }
     if (downOrRightPressed) {
